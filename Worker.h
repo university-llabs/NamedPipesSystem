@@ -6,10 +6,8 @@
 #include <iostream>
 #include <cstring>
 
-// Константы
-constexpr int MAX_DATA_SIZE = 1024 * 1024; // 1MB
+constexpr int MAX_DATA_SIZE = 1024 * 1024;
 
-// Типы сообщений (должны совпадать с Browser)
 enum class MessageType : uint32_t {
     TASK_SEPIA = 1,
     TASK_PRIMES = 2,
@@ -17,7 +15,7 @@ enum class MessageType : uint32_t {
     TASK_CRC32 = 4,
     TASK_STATS = 5,
     TASK_XOR = 6,
-    TASK_SUBSTRING = 7,   // Наш вариант
+    TASK_SUBSTRING = 7,
     TASK_MATRIX_MULT = 8,
     TASK_FACTORIAL = 9,
     TASK_HISTOGRAM = 10,
@@ -28,7 +26,6 @@ enum class MessageType : uint32_t {
     TERMINATE = 999
 };
 
-// Структура для передачи задачи
 #pragma pack(push, 1)
 struct TaskMessage {
     MessageType type;
@@ -39,7 +36,6 @@ struct TaskMessage {
 };
 #pragma pack(pop)
 
-// Структура для результата
 #pragma pack(push, 1)
 struct ResultMessage {
     uint32_t taskId;
@@ -48,13 +44,20 @@ struct ResultMessage {
 };
 #pragma pack(pop)
 
-// Вспомогательные функции
 inline std::string GetInputPipeName(int workerId) {
     return std::string("\\\\.\\pipe\\worker_in_") + std::to_string(workerId);
 }
 
 inline std::string GetOutputPipeName(int workerId) {
     return std::string("\\\\.\\pipe\\worker_out_") + std::to_string(workerId);
+}
+
+inline std::string GetMutexName(int workerId) {
+    return std::string("Global\\WorkerMutex_") + std::to_string(workerId);
+}
+
+inline std::string GetEventName(int workerId) {
+    return std::string("Global\\WorkerEvent_") + std::to_string(workerId);
 }
 
 inline bool WriteToPipe(HANDLE hPipe, const void* data, DWORD size) {
@@ -93,9 +96,12 @@ private:
     int workerId;
     HANDLE hInputPipe;
     HANDLE hOutputPipe;
+    HANDLE hResultMutex; 
+    HANDLE hTaskEvent;
     bool isRunning;
 
     bool ConnectToPipes();
+    bool OpenSyncObjects();
     void ProcessLoop();
     void ProcessTask(const TaskMessage* task);
     uint32_t CountSubstringOccurrences(const char* text, const char* pattern);

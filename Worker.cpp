@@ -1,15 +1,48 @@
-#include "Worker.h"
+#include <windows.h>
+#include <string>
+#include <iostream>
+#include <cstring>
 
-Worker::Worker(int id) : workerId(id), hInputPipe(INVALID_HANDLE_VALUE),
-hOutputPipe(INVALID_HANDLE_VALUE), isRunning(false) {}
+struct TaskMessage {
+    uint32_t type;
+    uint32_t taskId;
+    uint32_t dataSize;
+    char data[1];
+};
 
-Worker::~Worker() {
-    Stop();
+struct ResultMessage {
+    uint32_t taskId;
+    uint32_t resultSize;
+    char data[1];
+};
+
+uint32_t CountSubstring(const char* text, const char* pattern) {
+    if (!text || !pattern || pattern[0] == '\0') return 0;
+
+    uint32_t count = 0;
+    const char* pos = text;
+    size_t len = strlen(pattern);
+
+    while ((pos = strstr(pos, pattern)) != nullptr) {
+        count++;
+        pos += len;
+    }
+    return count;
 }
 
-bool Worker::ConnectToPipes() {
-    // Подключаемся к входному пайпу (читаем задачи)
-    std::string inputPipeName = GetInputPipeName(workerId);
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        std::cerr << "Usage: Worker.exe <worker_id>" << std::endl;
+        return 1;
+    }
+
+    int workerId = atoi(argv[1]);
+
+    std::string inputPipeName = "\\\\.\\pipe\\worker_in_" + std::to_string(workerId);
+    std::string outputPipeName = "\\\\.\\pipe\\worker_out_" + std::to_string(workerId);
+
+    HANDLE hInputPipe = INVALID_HANDLE_VALUE;
+    HANDLE hOutputPipe = INVALID_HANDLE_VALUE;
 
     while (true) {
         hInputPipe = CreateFileA(
@@ -22,24 +55,14 @@ bool Worker::ConnectToPipes() {
             NULL
         );
 
-        if (hInputPipe != INVALID_HANDLE_VALUE) {
-            break;
-        }
+        if (hInputPipe != INVALID_HANDLE_VALUE) break;
 
         if (GetLastError() != ERROR_PIPE_BUSY) {
-            std::cerr << "Worker " << workerId << ": Failed to connect to input pipe. Error: " << GetLastError() << std::endl;
-            return false;
+            return 1;
         }
 
-        // Ждем, если пайп занят
-        if (!WaitNamedPipeA(inputPipeName.c_str(), 5000)) {
-            std::cerr << "Worker " << workerId << ": Could not open pipe: 5 second wait timed out." << std::endl;
-            return false;
-        }
+        WaitNamedPipeA(inputPipeName.c_str(), 5000);
     }
-
-    // Подключаемся к выходному пайпу (пишем результаты)
-    std::string outputPipeName = GetOutputPipeName(workerId);
 
     while (true) {
         hOutputPipe = CreateFileA(
@@ -52,187 +75,67 @@ bool Worker::ConnectToPipes() {
             NULL
         );
 
-        if (hOutputPipe != INVALID_HANDLE_VALUE) {
-            break;
-        }
+        if (hOutputPipe != INVALID_HANDLE_VALUE) break;
 
         if (GetLastError() != ERROR_PIPE_BUSY) {
-            std::cerr << "Worker " << workerId << ": Failed to connect to output pipe. Error: " << GetLastError() << std::endl;
             CloseHandle(hInputPipe);
-            return false;
+            return 1;
         }
 
-        if (!WaitNamedPipeA(outputPipeName.c_str(), 5000)) {
-            std::cerr << "Worker " << workerId << ": Could not open output pipe: 5 second wait timed out." << std::endl;
-            CloseHandle(hInputPipe);
-            return false;
-        }
+        WaitNamedPipeA(outputPipeName.c_str(), 5000);
     }
 
-    std::cout << "Worker " << workerId << " connected to pipes." << std::endl;
-    return true;
-}
-
-uint32_t Worker::CountSubstringOccurrences(const char* text, const char* pattern) {
-    if (!text || !pattern || pattern[0] == '\0') {
-        return 0;
-    }
-
-    uint32_t count = 0;
-    const char* pos = text;
-
-    while ((pos = strstr(pos, pattern)) != nullptr) {
-        count++;
-        pos++; // Перемещаемся на один символ вперед
-    }
-
-    return count;
-}
-
-void Worker::ProcessTask(const TaskMessage* task) {
-    std::cout << "Worker " << workerId << " processing task " << task->taskId
-        << " of type " << static_cast<int>(task->type) << std::endl;
-
-    ResultMessage* result = nullptr;
-
-    switch (task->type) {
-    case MessageType::TASK_SUBSTRING: {
-        // Извлекаем текст и подстроку из данных
-        // Формат: текст\0подстрока\0
-        const char* dataPtr = task->data;
-
-        std::string text(dataPtr);
-        dataPtr += text.length() + 1; // Пропускаем текст и нулевой символ
-
-        std::string pattern(dataPtr);
-
-        // Выполняем поиск подстроки
-        uint32_t count = CountSubstringOccurrences(text.c_str(), pattern.c_str());
-
-        // Создаем результат
-        result = CreateResultMessage(task->taskId, &count, sizeof(uint32_t));
-
-        std::cout << "Worker " << workerId << ": Found " << count
-            << " occurrences of \"" << pattern << "\" in \"" << text << "\"" << std::endl;
-        break;
-    }
-    case MessageType::TERMINATE: {
-        std::cout << "Worker " << workerId << " received termination command." << std::endl;
-        isRunning = false;
-        result = CreateResultMessage(task->taskId, nullptr, 0);
-        break;
-    }
-    default: {
-        std::cerr << "Worker " << workerId << ": Unknown task type: " << static_cast<int>(task->type) << std::endl;
-        uint32_t error = 0;
-        result = CreateResultMessage(task->taskId, &error, sizeof(uint32_t));
-        break;
-    }
-    }
-
-    if (result) {
-        // Отправляем результат
-        DWORD bytesWritten;
-        uint32_t totalSize = sizeof(ResultMessage) + result->resultSize;
-
-        if (!WriteFile(hOutputPipe, result, totalSize, &bytesWritten, NULL)) {
-            std::cerr << "Worker " << workerId << ": Failed to write result. Error: " << GetLastError() << std::endl;
-        }
-
-        FreeResultMessage(result);
-    }
-}
-
-void Worker::ProcessLoop() {
-    while (isRunning) {
-        // Читаем заголовок задачи
+    while (true) {
         TaskMessage header;
-        if (!ReadFromPipe(hInputPipe, &header, sizeof(TaskMessage))) {
-            if (GetLastError() == ERROR_BROKEN_PIPE) {
-                std::cout << "Worker " << workerId << ": Pipe disconnected." << std::endl;
-            }
-            else {
-                std::cerr << "Worker " << workerId << ": Read failed. Error: " << GetLastError() << std::endl;
-            }
+        DWORD bytesRead;
+
+        if (!ReadFile(hInputPipe, &header, sizeof(TaskMessage), &bytesRead, NULL)) {
             break;
         }
 
-        // Выделяем память для полного сообщения
         uint32_t totalSize = sizeof(TaskMessage) + header.dataSize;
-        TaskMessage* fullMessage = (TaskMessage*)malloc(totalSize);
-        if (!fullMessage) {
-            std::cerr << "Worker " << workerId << ": Memory allocation failed!" << std::endl;
-            break;
-        }
+        TaskMessage* fullTask = (TaskMessage*)malloc(totalSize);
+        memcpy(fullTask, &header, sizeof(TaskMessage));
 
-        // Копируем заголовок
-        memcpy(fullMessage, &header, sizeof(TaskMessage));
-
-        // Читаем данные, если они есть
         if (header.dataSize > 0) {
-            if (!ReadFromPipe(hInputPipe, fullMessage->data, header.dataSize)) {
-                std::cerr << "Worker " << workerId << ": Failed to read task data. Error: " << GetLastError() << std::endl;
-                free(fullMessage);
+            if (!ReadFile(hInputPipe, fullTask->data, header.dataSize, &bytesRead, NULL)) {
+                free(fullTask);
                 break;
             }
         }
 
-        // Обрабатываем задачу
-        ProcessTask(fullMessage);
+        ResultMessage* result = nullptr;
+        uint32_t resultSize = 0;
 
-        free(fullMessage);
+        if (fullTask->type == 7) {
+            const char* dataPtr = fullTask->data;
+            std::string text(dataPtr);
+            dataPtr += text.length() + 1;
+            std::string pattern(dataPtr);
 
-        // Если получили команду завершения, выходим
-        if (header.type == MessageType::TERMINATE) {
+            uint32_t count = CountSubstring(text.c_str(), pattern.c_str());
+            resultSize = sizeof(uint32_t);
+            result = (ResultMessage*)malloc(sizeof(ResultMessage) + resultSize);
+            result->taskId = fullTask->taskId;
+            result->resultSize = resultSize;
+            memcpy(result->data, &count, resultSize);
+        }
+        else if (fullTask->type == 999) {
             break;
         }
-    }
-}
 
-bool Worker::Initialize() {
-    std::cout << "Initializing Worker " << workerId << "..." << std::endl;
-    return ConnectToPipes();
-}
+        free(fullTask);
 
-void Worker::Run() {
-    isRunning = true;
-    std::cout << "Worker " << workerId << " started." << std::endl;
-    ProcessLoop();
-}
+        if (result) {
+            DWORD bytesWritten;
+            WriteFile(hOutputPipe, result, sizeof(ResultMessage) + result->resultSize, &bytesWritten, NULL);
+            free(result);
+        }
 
-void Worker::Stop() {
-    isRunning = false;
-
-    if (hInputPipe != INVALID_HANDLE_VALUE) {
-        CloseHandle(hInputPipe);
-        hInputPipe = INVALID_HANDLE_VALUE;
+        FlushFileBuffers(hOutputPipe);
     }
 
-    if (hOutputPipe != INVALID_HANDLE_VALUE) {
-        CloseHandle(hOutputPipe);
-        hOutputPipe = INVALID_HANDLE_VALUE;
-    }
-
-    std::cout << "Worker " << workerId << " stopped." << std::endl;
-}
-
-// Точка входа для Worker
-int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: Worker.exe <worker_id>" << std::endl;
-        return 1;
-    }
-
-    int workerId = std::stoi(argv[1]);
-
-    Worker worker(workerId);
-
-    if (!worker.Initialize()) {
-        std::cerr << "Failed to initialize worker " << workerId << std::endl;
-        return 1;
-    }
-
-    worker.Run();
-
+    CloseHandle(hInputPipe);
+    CloseHandle(hOutputPipe);
     return 0;
-}
+}   
